@@ -33,6 +33,7 @@ class mc_model(nn.Module):
         self.mc_inplayer = nn.Linear(self.num_network_inputs, self.num_neurons, bias=False)
         self.mc_inplayer.weight = nn.Parameter(torch.normal(0,std=1/(self.num_network_inputs**0.5), size=(self.num_neurons,self.num_network_inputs)))  
         self.w_rec = np.loadtxt('isn_1.2_0.9.txt')         
+            
         self.W = torch.from_numpy(self.w_rec).float()
         self.mc_act = nn.ReLU() # activation function of layer neurons        
         self.h_inp = (self.spontaneous - self.W@self.spontaneous).T        
@@ -42,44 +43,46 @@ class mc_model(nn.Module):
         
         self.c_prms = nn.Parameter(torch.normal(0,std=0.1/self.num_neurons**0.5, size=(self.num_muscle, self.num_neurons))) 
         self.g = torch.randn(1,self.num_neurons)*0.2
+
         self.muscle_act = nn.LeakyReLU(0.4)
         
-    def forward(self, T, des_cart, ptb= None): 
+    def forward(self, T, des_cart, choice, ptb= None): 
         # reset state MC & arm 
         joint_state = torch.zeros(self.num_reach_combinations, 4)
         joint_state[:, :2] = self.home_joint_state # initial shoulder angle
                 
         self.inp_list = []
         self.networkactivity_list = []
-        self.torq_list = []
         self.mus_out_list = []
         self.force_list = []
         self.jointstate_list = []
         self.cartesianstate_list = []
        
-        tau_x = 10/200  
+        tau_x = 10/200 # neuronal discsretized leak (time constant, tau=20ms, dt/tau = 0.01/0.02 = 0.5)  
         tau_m = 10/50
         # initial states
-        x, self.c = self.unpack(des_cart-self.home_cart_state)
+        s = torch.zeros(self.num_reach_combinations, self.num_neurons)
+        x, self.c, xstars_tar = self.unpack(des_cart-self.home_cart_state)
+        u = torch.mm(-xstars_tar, self.W.T) + xstars_tar
         # noise for initial condition
         if ptb is not None:
             x = x + ptb            
         r = self.mc_act(x) 
+        
         muscle = 0
-
+        # start exe simulation over time
         for i in range(T):   
             self.networkactivity_list.append(r)            
             muscle = self.muscle_act(tau_m * torch.mm(r, self.c.T)) + (1 - tau_m) * muscle
             if i<10:
-                joint_state, force, torq = self.adyn.forward(joint_state, muscle, torch.zeros(self.num_reach_combinations, self.num_muscle)) 
+                joint_state, force = self.adyn.forward(joint_state, muscle, torch.zeros(self.num_reach_combinations, self.num_muscle)) 
             else:
-                joint_state, force, torq = self.adyn.forward(joint_state, muscle, self.mus_out_list[i-10]) 
+                joint_state, force = self.adyn.forward(joint_state, muscle, self.mus_out_list[i-10]) 
             # append the current time simulation data to simulation collector variables
             self.mus_out_list.append(muscle)
             self.force_list.append(force)
             self.jointstate_list.append(joint_state)
-            self.torq_list.append(torq)
-            
+
             cart_state = self.adyn.armkin(joint_state) 
             self.cartesianstate_list.append(cart_state)   
             
@@ -104,15 +107,16 @@ class mc_model(nn.Module):
         z = self.num_neurons * self.num_reach_combinations * xstars_std ** 2
         return top_obs, z
     
-
+    # (reach,n)      
     def unpack(self, joint_targ):              
         # Calculate xstars 
-        xstars = torch.mm(self.top_obs, self.xstars_prms)
+        xstars_tar = torch.mm(joint_targ, self.mc_inplayer.weight[:,:2].T)
+        xstars = torch.mm(self.top_obs, self.xstars_prms) + xstars_tar.T
         xstars = torch.sqrt(self.z / torch.sum(xstars ** 2)) * xstars 
         xstars_motor = torch.cat((xstars + self.spontaneous, self.spontaneous), axis=1)
         h = torch.linalg.solve(torch.mm(xstars_motor.T, xstars_motor), xstars_motor.T)
         c = self.c_prms - torch.mm(self.c_prms, torch.mm(xstars_motor, h))               
-        return (self.spontaneous + xstars).T, c  
+        return (self.spontaneous + xstars).T, c, xstars_tar   
   
                 
                          
