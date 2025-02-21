@@ -15,12 +15,14 @@ from lib.some import reduct
 class mc_model(nn.Module):
     def __init__(self, dh, home_joint_state, home_cart_state):
         super(mc_model, self).__init__()
+        # fixed control parameters        
         self.dh = dh 
         self.num_network_inputs = 10
         self.nobs = self.num_neurons = 400
         self.num_muscle = 6
         self.num_reach_combinations = 8
         self.fb_delay = 25 
+        
         
         self.home_joint_state = home_joint_state*torch.ones(self.num_reach_combinations,2)
         self.home_cart_state = home_cart_state*torch.ones(self.num_reach_combinations,2)
@@ -29,22 +31,26 @@ class mc_model(nn.Module):
         # Intantiate the biomechanical arm dynamics at home location
         self.adyn = muscular_arm(dh,self.num_reach_combinations)
         
-        # Input layer 
+        # MC layer 
         self.mc_inplayer = nn.Linear(self.num_network_inputs, self.num_neurons, bias=True)
         self.mc_inplayer.weight = nn.Parameter(torch.normal(0,std=1/(self.num_network_inputs**0.5), size=(self.num_neurons,self.num_network_inputs)))   
+        # self.mc_inplayer.weight[:, 0].data.copy_(-self.mc_inplayer.weight[:, 2])
+        # self.mc_inplayer.weight[:, 1].data.copy_(-self.mc_inplayer.weight[:, 3])
         self.mc_inplayer.bias = torch.nn.Parameter(torch.zeros(self.num_neurons))
-
-        # MC layer 
-        self.w_rec = np.loadtxt('isn_1.2_0.9.txt')                     
+ 
+        self.w_rec = np.loadtxt('isn_1.2_0.9.txt')         
+            
         self.W = torch.from_numpy(self.w_rec).float()
         self.mc_act = nn.ReLU() # activation function of layer neurons        
         self.h_inp = (self.spontaneous - self.W@self.spontaneous).T        
-        self.xstars_prms = nn.Parameter(torch.normal(0,std=1.5/(self.nobs**0.5), size=(self.nobs,self.num_reach_combinations)))        
+        self.xstars_prms = nn.Parameter(torch.normal(0,std=1.5/(self.nobs**0.5), size=(self.nobs,self.num_reach_combinations)))
+        
         self.top_obs, self.z = self.param_unpack()             
-        self.g = torch.randn(1,self.num_neurons)*0.2
-
-        # Output layer
+        
         self.c_prms = nn.Parameter(torch.normal(0,std=0.1/self.num_neurons**0.5, size=(self.num_muscle, self.num_neurons))) 
+        self.g = torch.randn(1,self.num_neurons)*0.2
+        # self.g = torch.randn(1,self.num_neurons)*np.sqrt(0.1)
+        # self.muscle_act = nn.Tanh()
         self.muscle_act = nn.LeakyReLU(0.4)
 
 
@@ -94,19 +100,22 @@ class mc_model(nn.Module):
                 sen_inp = torch.cat(((cart_state[:,:2]-self.home_cart_state), torch.zeros(self.num_reach_combinations, 2), force/2.7), 1) 
             elif choice == 'nomus':   # without muscle force feedback
                 sen_inp = torch.cat(((cart_state[:,:2]-self.home_cart_state), cart_state[:,2:], torch.zeros(self.num_reach_combinations, 6)), 1)
-            elif choice == 'only':    # without velocity and muscle force feedback
+            elif choice == 'only':    # without velocity + muscle force feedback
                 sen_inp = torch.cat(((cart_state[:,:2]-self.home_cart_state), torch.zeros(self.num_reach_combinations, 8)), 1)           
-          
+            elif choice == 'vel':    # only velocity feedback
+                sen_inp = torch.cat((torch.zeros(self.num_reach_combinations, 2), cart_state[:,2:], torch.zeros(self.num_reach_combinations, 6)), 1)
+            elif choice == 'force':   # only muscle force feedback
+                sen_inp = torch.cat((torch.zeros(self.num_reach_combinations, 4), force), 1)      
+            elif choice == 'vf':    # only velocity + muscle force feedback
+                sen_inp = torch.cat((torch.zeros(self.num_reach_combinations, 2), cart_state[:,2:], force/2.7), 1)       
+                
             # MC network layers dynamics
             tau_rise=6
             tau_decay=60                       
             cis = (5+self.g)/0.6968*(np.exp(-(i+1) / tau_decay) - np.exp(-(i+1) / tau_rise))
-            if choice == 'auto':  # autonomous dynamical system
-                input_sum = torch.mm(r, self.W.T) - x + self.h_inp + cis 
-            else:
-                network_inputs = self.mc_inplayer(sen_inp)*2.7
-                self.inp_list.append(network_inputs)  
-                input_sum = torch.mm(network_inputs + r, self.W.T) - x - network_inputs  + self.h_inp + cis + u*2.7
+            network_inputs = self.mc_inplayer(sen_inp)*2.7
+            self.inp_list.append(network_inputs)  
+            input_sum = torch.mm(network_inputs + r, self.W.T) - x - network_inputs  + self.h_inp + cis + u*2.7
 
             x = tau_x * input_sum + x 
             r = self.mc_act(x) 
